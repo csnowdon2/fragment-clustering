@@ -1,9 +1,12 @@
 #!/bin/python3
+import math
 import sys
 import argparse
 import json
 import numpy as np
+import concurrent.futures
 from sklearn.cluster import KMeans
+from collections import Counter
 
 ########################################################################################################
 ############################################# INFRASTRUCTURE ###########################################
@@ -95,6 +98,7 @@ class Topology:
         self.connectivity = []
         self.fragments = []
         self.fragment_formal_charges = []
+        self.xyz = None
         
     def assemble_fragments(self):
         ret = []
@@ -102,22 +106,78 @@ class Topology:
             ret.append(Fragment([self.atoms[i] for i in atom_ixs]))
         return ret
         
-    def from_json(self, topology_json, connected_fragments = False):
-        
-        symbols = topology_json['symbols']
-        raw_coords = topology_json['geometry']
-        
+    def from_xyz(self, xyz_file):
+        symbols = []
+        raw_coords = []
+
+        self.xyz = xyz_file
+        with open(self.xyz) as xyz:
+            xyz.readline()
+            xyz.readline()
+            for line in xyz.readlines():
+                dat = line.split()
+                symbols.append(dat[0])
+                raw_coords.append(float(dat[1]))
+                raw_coords.append(float(dat[2]))
+                raw_coords.append(float(dat[3]))
+
         coords = []
         for i in range(0, len(raw_coords), 3):
             coords.append([raw_coords[i],raw_coords[i+1],raw_coords[i+2]])
 
         for (symbol, coord) in zip(symbols,coords):
             self.atoms.append(Atom(coord, symbol_to_a_no[symbol]))
-            
+
+        if len(symbols)%3 != 0:
+            print("GIVE WATER ONLY")
+
+
+        self.connectivity = []
+        self.fragments = []
+        for i in range(0,len(symbols),3):
+            if symbols[i] != 'O' or symbols[i+1] != 'H' or symbols[i+2] != 'H':
+                raise "WATER WATER WATER"
+            self.fragments.append([i,i+1,i+2])
+        self.fragment_formal_charges = [0 for _ in range(len(self.fragments))]
+
+    def from_json(self, topology_json, connected_fragments = False):
+
+        symbols = []
+        raw_coords = []
+        if 'symbols' in topology_json and 'geometry' in topology_json:
+            symbols = topology_json['symbols']
+            raw_coords = topology_json['geometry']
+
+
+        elif 'xyz' in topology_json:
+            self.xyz = topology_json['xyz']
+            with open(self.xyz) as xyz:
+                xyz.readline()
+                xyz.readline()
+                for line in xyz.readlines():
+                    dat = line.split()
+                    symbols.append(dat[0])
+                    raw_coords.append(float(dat[1]))
+                    raw_coords.append(float(dat[2]))
+                    raw_coords.append(float(dat[3]))
+        else:
+            raise "Bad input"
+
+        coords = []
+        for i in range(0, len(raw_coords), 3):
+            coords.append([raw_coords[i],raw_coords[i+1],raw_coords[i+2]])
+
+        for (symbol, coord) in zip(symbols,coords):
+            self.atoms.append(Atom(coord, symbol_to_a_no[symbol]))
+
         nfrag = len(topology_json['fragments'])
-            
-        
-        self.connectivity = topology_json['connectivity']
+
+
+        if 'connectivity' in topology_json:
+            self.connectivity = topology_json['connectivity']
+        else:
+            self.connectivity = []
+
         if connected_fragments:
             self.fragment_by_connectivity()
             self.fragment_formal_charges = [0 for _ in range(len(self.fragments))]
@@ -125,6 +185,7 @@ class Topology:
         else:
             self.fragments = topology_json['fragments']
             self.fragment_formal_charges = topology_json["fragment_formal_charges"]
+
         
     def fragment_by_connectivity(self):
         
@@ -157,13 +218,17 @@ class Topology:
         topology_json = {}
         topology_json['fragments'] = self.fragments
         topology_json['fragment_formal_charges'] = self.fragment_formal_charges
-        topology_json['connectivity'] = self.connectivity
+        if self.connectivity:
+            topology_json['connectivity'] = self.connectivity
         
-        topology_json['geometry'] = []
-        topology_json['symbols'] = []
-        for atom in self.atoms:
-            topology_json['symbols'].append(a_no_to_symbol[atom.a_no])
-            topology_json['geometry'].extend(atom.coord)
+        if self.xyz == None:
+            topology_json['geometry'] = []
+            topology_json['symbols'] = []
+            for atom in self.atoms:
+                topology_json['symbols'].append(a_no_to_symbol[atom.a_no])
+                topology_json['geometry'].extend(atom.coord)
+        else:
+            topology_json['xyz'] = self.xyz
         return topology_json
 
     def nfrag(self):
@@ -177,6 +242,7 @@ class Topology:
         ret = Topology()
         ret.atoms = self.atoms
         ret.connectivity = self.connectivity
+        ret.xyz = self.xyz
         
         nfrag = max(group_map)+1
         ret.fragments = [[] for _ in range(nfrag)]
@@ -271,16 +337,80 @@ def pair_fragments(frags, fragsA_map, fragsB_map):
     return ret
 
 
+#def cluster_fragments(frags, multiplicity):
+#    centres = np.array([frag.centre_of_charge() for frag in frags])
+#    weights = np.array([frag.charge for frag in frags])
+#    
+#    clusters = len(frags)//multiplicity
+#    kmeans = KMeans(n_clusters=clusters, random_state=0).fit(centres, sample_weight=weights)
+#    print(Counter(kmeans.labels_))
+#    
+#    print("Equalizing")
+#    return equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_)
+
+def subcluster(p):
+    i,frags,centres,weights,clusters,multiplicity = p
+    print("Group",i,"size",len(frags),"clusters",clusters)
+    kmeans = KMeans(n_clusters=clusters, random_state=0,n_init=10).fit(centres, sample_weight=weights)
+    x = equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_, multiplicity)
+    print("Group",i,"done")
+    return x
+
 def cluster_fragments(frags, multiplicity):
     centres = np.array([frag.centre_of_charge() for frag in frags])
     weights = np.array([frag.charge for frag in frags])
     
-    clusters = len(frags)//multiplicity
-    kmeans = KMeans(n_clusters=clusters, random_state=0).fit(centres, sample_weight=weights)
-    
-    return equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_)
+    frags_per_cluster = 256
+    pre_clusters = len(frags)//frags_per_cluster
 
-def equalize_clusters(frags, membership, centroids):
+    print("Pre-clustering into",pre_clusters,"groups")
+    pc_kmeans = KMeans(n_clusters=pre_clusters, random_state=0,n_init=10).fit(centres, sample_weight=weights)
+    labels = pc_kmeans.labels_
+    cluster_map = [-1 for _ in range(len(frags))]
+    with concurrent.futures.ProcessPoolExecutor() as pool:
+        problem_list = []
+        counts = Counter(labels)
+        #for i in range(pre_clusters):
+        for i in range(10):
+            sub_frags = [frags[j] for (j,lab) in enumerate(labels) if lab == i]
+            sub_centres = [centres[j] for (j,lab) in enumerate(labels) if lab == i]
+            sub_weights = [weights[j] for (j,lab) in enumerate(labels) if lab == i]
+            nfrag = counts[i]
+            problem_list.append((i,sub_frags,sub_centres,sub_weights,
+                math.ceil(nfrag/multiplicity),multiplicity))
+        out = pool.map(subcluster, problem_list)
+
+        cluster_ix = 0
+        for (i,o) in enumerate(out):
+            print(i,"Done, ix =",cluster_ix,"to",cluster_ix+max(o)+1)
+            frag_global_ixs = [j for (j,lab) in enumerate(labels) if lab == i]
+            for (frag_ix,cluster) in enumerate(o):
+                global_ix = frag_global_ixs[frag_ix]
+                cluster_map[global_ix] = cluster+cluster_ix
+            cluster_ix += max(o)+1
+    print(Counter(cluster_map))
+    return cluster_map            
+
+    # counts = Counter(pc_kmeans.labels_)
+    # for i in range(pre_clusters):
+    #     sub_frags = [frags[j] for (j,lab) in enumerate(pc_kmeans.labels_) if lab == i]
+    #     sub_centres = [centres[j] for (j,lab) in enumerate(pc_kmeans.labels_) if lab == i]
+    #     sub_weights = [weights[j] for (j,lab) in enumerate(pc_kmeans.labels_) if lab == i]
+    #     nfrag = counts[i]
+    #     clusters = math.ceil(nfrag/multiplicity)
+    #     print("Group",i,"size",nfrag,"clusters",clusters)
+    #     kmeans = KMeans(n_clusters=clusters, random_state=0).fit(sub_centres, sample_weight=sub_weights)
+    #     x = equalize_clusters(sub_frags, kmeans.labels_, kmeans.cluster_centers_, multiplicity)
+    #     print(x)
+
+    #clusters = len(frags)//multiplicity
+    #kmeans = KMeans(n_clusters=clusters, random_state=0).fit(centres, sample_weight=weights)
+    #print(Counter(kmeans.labels_))
+    #
+    #print("Equalizing")
+    #return equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_)
+
+def equalize_clusters(frags, membership, centroids, multiplicity=None):
     # make clusters equal sizes
     def gain(i,j):
         ci = centroids[membership[i]]
@@ -292,56 +422,91 @@ def equalize_clusters(frags, membership, centroids):
     def fragsize(i):
         return sum([1 if mem == i else 0 for mem in membership])
     
+    if multiplicity == None:
+        multiplicity = math.ceil(len(frags)/len(centroids)) 
+
+    #if len(frags)%multiplicity < multiplicity/2:
+    #    multiplicity -= 1
+
     prev_mem = []
-    for i in range(20):
+    for iteration in range(20):
         
-        if i > 0:
+        if iteration > 0:
             done = True
             for x,y in zip(membership, prev_mem):
                 if x != y:
                     done = False
                     break
             if done:
-                print("CONVERGED!")
+                #print("CONVERGED!")
                 break
         prev_mem = membership.copy()
-        print("Iteration",i)
         # Calculate centroids
         #print("ITER")
+        centroids = [[0.0,0.0,0.0] for _ in range(len(centroids))]
+        counts = [0 for _ in range(len(centroids))]
+
+        for (j,mem) in enumerate(membership):
+            centroids[mem][0] += frags[j].centre_of_charge()[0]*frags[j].charge
+            centroids[mem][1] += frags[j].centre_of_charge()[1]*frags[j].charge
+            centroids[mem][2] += frags[j].centre_of_charge()[2]*frags[j].charge
+            counts[mem] += frags[j].charge
+
         for i in range(len(centroids)):
-            cent = [0.0,0.0,0.0]
-            n = 0
-            for (j,mem) in enumerate(membership):
-                if mem == i:
-                    cent[0] += frags[j].centre_of_charge()[0]*frags[j].charge
-                    cent[1] += frags[j].centre_of_charge()[1]*frags[j].charge
-                    cent[2] += frags[j].centre_of_charge()[2]*frags[j].charge
-                    n += frags[j].charge
-            if n > 0:
-                cent[0] /= n
-                cent[1] /= n
-                cent[2] /= n
-            centroids[i] = cent
+            if counts[i] > 0:
+                centroids[i][0] /= counts[i]
+                centroids[i][1] /= counts[i]
+                centroids[i][2] /= counts[i]
+
+        # Old centroid calculation
+        #for i in range(len(centroids)):
+        #    cent = [0.0,0.0,0.0]
+        #    n = 0
+        #    for (j,mem) in enumerate(membership):
+        #        if mem == i:
+        #            cent[0] += frags[j].centre_of_charge()[0]*frags[j].charge
+        #            cent[1] += frags[j].centre_of_charge()[1]*frags[j].charge
+        #            cent[2] += frags[j].centre_of_charge()[2]*frags[j].charge
+        #            n += frags[j].charge
+        #    if n > 0:
+        #        cent[0] /= n
+        #        cent[1] /= n
+        #        cent[2] /= n
+        #    centroids[i] = cent
         
         outgoing = {}
         for i in range(len(centroids)):
             outgoing[i] = []
 
-
-        deltas = []
+        deltas = [None for _ in range(len(frags))]
         for i,frag in enumerate(frags):
             mem = membership[i]
             clust = -1
             best_alternative = 1000000.0
-            for j,centroid in [(j,centroids[j]) for j in range(len(centroids)) if j != mem]:
-                dist = cart(frag.centre_of_charge(),centroid)
-                if dist < best_alternative:
-                    best_alternative = dist
-                    clust = j
-            deltas.append((i,best_alternative-cart(frag.centre_of_charge(),centroids[membership[i]]),clust))
 
-        deltas = sorted(deltas, key=lambda x: x[1])
+            coc = frag.centre_of_charge()
+            distances = map(lambda x: (x[0],cart(coc, x[1])), filter(lambda x: x[0] != mem, enumerate(centroids)))
+            best = min(distances, key=lambda x: x[1])
+
+            clust = best[0]
+            best_alternative = best[1]
+
+            #for j,centroid in [(j,centroids[j]) for j in range(len(centroids)) if j != mem]:
+            #    dist = cart(frag.centre_of_charge(),centroid)
+            #    if dist < best_alternative:
+            #        best_alternative = dist
+            #        clust = j
+            deltas[i] = (i,best_alternative-cart(frag.centre_of_charge(),centroids[membership[i]]),clust)
+
+            # best_alternative = distance to nearest other centroid
+            # d = distance to current centroid
+            # delta is negative iff the best alternative is closer
+
+        deltas = sorted(deltas, key=lambda x: x[1], reverse=False)
+
         for (i,delta,best) in deltas:
+            # Consider only closest N fragments?
+            #closest_frags = sorted(enumerate(centroids), key=lambda x: cart(x[1], centroids[membership[i]]))[:10]
             for (j,centroid) in enumerate(centroids):
                 if membership[i] == j:
                     continue
@@ -357,12 +522,22 @@ def equalize_clusters(frags, membership, centroids):
                 if done:
                     break
 
-                if fragsize(j) < len(frags)//len(centroids) < fragsize(membership[i]):
+                if fragsize(j) < multiplicity < fragsize(membership[i]):
                     #print("Move frag", i, "to cluster", j, "for size")
+                    membership[i] = j
+                    break
+                if fragsize(membership[i]) <= fragsize(j) < multiplicity:
                     membership[i] = j
                     break
                     
                 outgoing[membership[i]].append(i)
+
+        localities = [0.0 for _ in range(len(centroids))]
+        for (frag,mem) in enumerate(membership):
+            localities[mem] += cart(frags[frag].centre_of_charge(), centroids[mem])
+
+        #print("Iteration",iteration,"Goodness",sum(localities))
+        #print(Counter(membership))
 
     return membership
 
@@ -399,18 +574,25 @@ def form_paired_topology(topology):
 
 def form_clustered_topology(topology, multiplicity):
     fragments = topology.assemble_fragments()
+    print("Clustering")
     enlarged_fragments_map = cluster_fragments(fragments, multiplicity)
+    print("Grouping")
     enlarged_topology = topology.group_fragments(enlarged_fragments_map)
     return enlarged_topology
 
 def main():
     args = parse_arguments()
 
-    with open(args.input) as f:
-        input_file = json.load(f)
-    
     topology = Topology()
-    topology.from_json(input_file, connected_fragments=args.infer_fragments)
+
+    extension = args.input.split('.')[1]
+    if extension == 'json':
+        with open(args.input) as f:
+            input_file = json.load(f)
+            topology.from_json(input_file, connected_fragments=args.infer_fragments)
+    elif extension == 'xyz':
+        print("THIS BETTER BE WATER")
+        topology.from_xyz(args.input)
     
     print("Initial fragment count:", topology.nfrag())
 
