@@ -124,14 +124,7 @@ class Topology:
 
         coords = []
         symbols = []
-        skip = 0
         for i in range(0, len(raw_coords), 3):
-            #if skip > 0:
-            #    skip -= 1
-            #    continue
-            #if raw_coords[i] < 0.0:
-            #    skip = 2
-            #    continue
             coords.append([raw_coords[i],raw_coords[i+1],raw_coords[i+2]])
             symbols.append(raw_symbols[i//3])
         print(Counter(symbols))
@@ -147,7 +140,7 @@ class Topology:
         self.fragments = []
         for i in range(0,len(symbols),3):
             if symbols[i] != 'O' or symbols[i+1] != 'H' or symbols[i+2] != 'H':
-                raise "WATER WATER WATER"
+                raise Exception("WATER WATER WATER")
             self.fragments.append([i,i+1,i+2])
         self.fragment_formal_charges = [0 for _ in range(len(self.fragments))]
 
@@ -172,7 +165,7 @@ class Topology:
                     raw_coords.append(float(dat[2]))
                     raw_coords.append(float(dat[3]))
         else:
-            raise "Bad input"
+            raise Exception("Bad input")
 
         coords = []
         for i in range(0, len(raw_coords), 3):
@@ -180,9 +173,6 @@ class Topology:
 
         for (symbol, coord) in zip(symbols,coords):
             self.atoms.append(Atom(coord, symbol_to_a_no[symbol]))
-
-        nfrag = len(topology_json['fragments'])
-
 
         if 'connectivity' in topology_json:
             self.connectivity = topology_json['connectivity']
@@ -322,8 +312,8 @@ def pair_fragments(frags, fragsA_map, fragsB_map):
 
         deltas = sorted(deltas, key=lambda x: x[1])
 
-        for (i,delta,best) in deltas:
-            for (j,fragj) in enumerate(fragsA):
+        for (i,_,_) in deltas:
+            for (j,_) in enumerate(fragsA):
                 if membership[i] == j:
                     continue
                 done = False
@@ -362,7 +352,7 @@ def pair_fragments(frags, fragsA_map, fragsB_map):
 def subcluster(p):
     i,frags,centres,weights,clusters,multiplicity = p
     print("Group",i,"size",len(frags),"clusters",clusters)
-    kmeans = KMeans(n_clusters=clusters, random_state=0,n_init=10).fit(centres, sample_weight=weights)
+    kmeans = KMeans(n_clusters=clusters, random_state=0,n_init='auto').fit(centres, sample_weight=weights)
     x = equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_, multiplicity)
     print("Group",i,"done")
     return x
@@ -375,8 +365,11 @@ def cluster_fragments(frags, multiplicity):
     pre_clusters = len(frags)//frags_per_cluster
 
     print("Pre-clustering into",pre_clusters,"groups")
-    pc_kmeans = KMeans(n_clusters=pre_clusters, random_state=0,n_init=10).fit(centres, sample_weight=weights)
+    pc_kmeans = KMeans(n_clusters=pre_clusters, random_state=0,n_init='auto').fit(centres, sample_weight=weights)
     labels = pc_kmeans.labels_
+    if labels == None:
+        raise Exception("KMeans failed")
+
     cluster_map = [-1 for _ in range(len(frags))]
     with concurrent.futures.ProcessPoolExecutor() as pool:
         problem_list = []
@@ -443,7 +436,7 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
     prev_mem = []
     for iteration in range(100):
         if iteration == 99:
-            raise "FAILED TO CONVERGE"
+            raise Exception("FAILED TO CONVERGE")
         
         if iteration > 0:
             done = True
@@ -492,7 +485,7 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
         for i in range(len(centroids)):
             outgoing[i] = []
 
-        deltas = [None for _ in range(len(frags))]
+        deltas = []
         for i,frag in enumerate(frags):
             mem = membership[i]
             clust = -1
@@ -510,18 +503,14 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
             #    if dist < best_alternative:
             #        best_alternative = dist
             #        clust = j
-            deltas[i] = (i,best_alternative-cart(frag.centre_of_charge(),centroids[membership[i]]),clust)
-
-            # best_alternative = distance to nearest other centroid
-            # d = distance to current centroid
-            # delta is negative iff the best alternative is closer
+            deltas.append(((i,best_alternative-cart(frag.centre_of_charge(),centroids[membership[i]]),clust)))
 
         deltas = sorted(deltas, key=lambda x: x[1], reverse=False)
 
-        for (i,delta,best) in deltas:
+        for (i,_,best) in deltas:
             # Consider only closest N fragments?
             #closest_frags = sorted(enumerate(centroids), key=lambda x: cart(x[1], centroids[membership[i]]))[:10]
-            for (j,centroid) in enumerate(centroids):
+            for (j,_) in enumerate(centroids):
                 if membership[i] == j:
                     continue
 
@@ -581,6 +570,9 @@ def parse_arguments():
 def form_paired_topology(topology):
     fragments = topology.assemble_fragments()
     pair_fingerprints = check_for_pairs(fragments)
+    if pair_fingerprints == None:
+        raise Exception("Unable to pair fragments")
+
     print("Pairing", pair_fingerprints[0], "with", pair_fingerprints[1])
     fragsA = []
     fragsB = []
@@ -676,9 +668,9 @@ def main():
         coc = fragment.centre_of_charge()
         for at in atoms:
             d = cart(coc,at.coord)
-            ds.append(cart(coc,at.coord))
-            max_d = max(max_d, cart(coc, at.coord))
-            avg_d += cart(coc,at.coord)
+            ds.append(d)
+            max_d = max(max_d, d)
+            avg_d += d
             total_d += 1
     df = pd.DataFrame(ds)
     print(df.describe())
