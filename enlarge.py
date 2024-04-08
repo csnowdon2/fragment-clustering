@@ -7,6 +7,8 @@ import json
 import numpy as np
 import concurrent.futures
 from sklearn.cluster import KMeans
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import r2_score
 from collections import Counter
 
 ########################################################################################################
@@ -91,9 +93,26 @@ def union(fragments):
             new_frag.weighted_centre[i] += frag.weighted_centre[i]
     return new_frag
 
+def fragment_locality(frag : Fragment):
+    distances = []
+    for atom in frag.atoms:
+        distances.append(cart(atom.coord, frag.centre_of_charge()))
+    #X = [(i+1,dist**(1/3)) for (i,dist) in enumerate(distances)]
+    distances = sorted(distances)
+    X = np.array([dist for dist in distances])
+    X = X.reshape(-1,1)
+
+    y = [(i+1)**(1/3) for (i,_) in enumerate(distances)]
+    y = np.array(y)
+    reg = LinearRegression().fit(X,y)
+    return reg.score(X,y)
+
 
 # Represents topology component of input json
 class Topology:
+    atoms: list[Atom]
+    fragments: list[list[int]]
+
     def __init__(self):
         self.atoms = []
         self.connectivity = []
@@ -101,7 +120,7 @@ class Topology:
         self.fragment_formal_charges = []
         self.xyz = None
         
-    def assemble_fragments(self):
+    def assemble_fragments(self) -> list[Fragment]:
         ret = []
         for atom_ixs in self.fragments:
             ret.append(Fragment([self.atoms[i] for i in atom_ixs]))
@@ -338,17 +357,6 @@ def pair_fragments(frags, fragsA_map, fragsB_map):
     return ret
 
 
-#def cluster_fragments(frags, multiplicity):
-#    centres = np.array([frag.centre_of_charge() for frag in frags])
-#    weights = np.array([frag.charge for frag in frags])
-#    
-#    clusters = len(frags)//multiplicity
-#    kmeans = KMeans(n_clusters=clusters, random_state=0).fit(centres, sample_weight=weights)
-#    print(Counter(kmeans.labels_))
-#    
-#    print("Equalizing")
-#    return equalize_clusters(frags, kmeans.labels_, kmeans.cluster_centers_)
-
 def subcluster(p):
     i,frags,centres,weights,clusters,multiplicity = p
     print("Group",i,"size",len(frags),"clusters",clusters)
@@ -465,22 +473,6 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
                 centroids[i][1] /= counts[i]
                 centroids[i][2] /= counts[i]
 
-        # Old centroid calculation
-        #for i in range(len(centroids)):
-        #    cent = [0.0,0.0,0.0]
-        #    n = 0
-        #    for (j,mem) in enumerate(membership):
-        #        if mem == i:
-        #            cent[0] += frags[j].centre_of_charge()[0]*frags[j].charge
-        #            cent[1] += frags[j].centre_of_charge()[1]*frags[j].charge
-        #            cent[2] += frags[j].centre_of_charge()[2]*frags[j].charge
-        #            n += frags[j].charge
-        #    if n > 0:
-        #        cent[0] /= n
-        #        cent[1] /= n
-        #        cent[2] /= n
-        #    centroids[i] = cent
-        
         outgoing = {}
         for i in range(len(centroids)):
             outgoing[i] = []
@@ -610,33 +602,6 @@ def main():
     
     print("Initial fragment count:", topology.nfrag())
 
-    #max_d = 0.0
-    #avg_d = 0.0
-    #total_d = 0
-    #ds = []
-    #for frag in topology.fragments:
-    #    atoms = [topology.atoms[at] for at in frag]
-    #    fragment = Fragment(atoms)
-    #    coc = fragment.centre_of_charge()
-    #    for at in atoms:
-    #        if cart(coc,at.coord) > 20.0:
-    #            print(at.coord)
-    #            local_ds = []
-    #            for other in topology.atoms:
-    #                local_ds.append(cart(at.coord, other.coord))
-    #            print(pd.DataFrame(local_ds).describe())
-    #            print(pd.DataFrame(local_ds).quantile(0.05))
-    #            print()
-    #        ds.append(cart(coc,at.coord))
-    #        max_d = max(max_d, cart(coc, at.coord))
-    #        avg_d += cart(coc,at.coord)
-    #        total_d += 1
-    #df = pd.DataFrame(ds)
-    #print(df.describe())
-    #print("max_d =",max_d)
-    #print("avg_d =",avg_d/total_d)
-    #return 0
-
     # Check if input can be paired
     paired_input = check_for_pairs(topology.assemble_fragments())
     if args.pair and not paired_input:
@@ -657,25 +622,6 @@ def main():
     print("Clustering fragments with multiplicity", args.multiplicity)
     topology = form_clustered_topology(topology,args.multiplicity)
     print("Final fragment count:", topology.nfrag())
-
-    max_d = 0.0
-    avg_d = 0.0
-    total_d = 0
-    ds = []
-    for frag in topology.fragments:
-        atoms = [topology.atoms[at] for at in frag]
-        fragment = Fragment(atoms)
-        coc = fragment.centre_of_charge()
-        for at in atoms:
-            d = cart(coc,at.coord)
-            ds.append(d)
-            max_d = max(max_d, d)
-            avg_d += d
-            total_d += 1
-    df = pd.DataFrame(ds)
-    print(df.describe())
-    print("max_d =",max_d)
-    print("avg_d =",avg_d/total_d)
 
     with open(args.o,'w') as f:
         json.dump(topology.to_json(),f,indent=4)
