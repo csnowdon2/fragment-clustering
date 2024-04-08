@@ -1,4 +1,5 @@
 #!/bin/python3
+import pandas as pd
 import math
 import sys
 import argparse
@@ -107,7 +108,7 @@ class Topology:
         return ret
         
     def from_xyz(self, xyz_file):
-        symbols = []
+        raw_symbols = []
         raw_coords = []
 
         self.xyz = xyz_file
@@ -116,14 +117,24 @@ class Topology:
             xyz.readline()
             for line in xyz.readlines():
                 dat = line.split()
-                symbols.append(dat[0])
+                raw_symbols.append(dat[0])
                 raw_coords.append(float(dat[1]))
                 raw_coords.append(float(dat[2]))
                 raw_coords.append(float(dat[3]))
 
         coords = []
+        symbols = []
+        skip = 0
         for i in range(0, len(raw_coords), 3):
+            #if skip > 0:
+            #    skip -= 1
+            #    continue
+            #if raw_coords[i] < 0.0:
+            #    skip = 2
+            #    continue
             coords.append([raw_coords[i],raw_coords[i+1],raw_coords[i+2]])
+            symbols.append(raw_symbols[i//3])
+        print(Counter(symbols))
 
         for (symbol, coord) in zip(symbols,coords):
             self.atoms.append(Atom(coord, symbol_to_a_no[symbol]))
@@ -360,7 +371,7 @@ def cluster_fragments(frags, multiplicity):
     centres = np.array([frag.centre_of_charge() for frag in frags])
     weights = np.array([frag.charge for frag in frags])
     
-    frags_per_cluster = 256
+    frags_per_cluster = 500
     pre_clusters = len(frags)//frags_per_cluster
 
     print("Pre-clustering into",pre_clusters,"groups")
@@ -370,8 +381,8 @@ def cluster_fragments(frags, multiplicity):
     with concurrent.futures.ProcessPoolExecutor() as pool:
         problem_list = []
         counts = Counter(labels)
-        #for i in range(pre_clusters):
-        for i in range(10):
+        for i in range(pre_clusters):
+        #for i in range(10):
             sub_frags = [frags[j] for (j,lab) in enumerate(labels) if lab == i]
             sub_centres = [centres[j] for (j,lab) in enumerate(labels) if lab == i]
             sub_weights = [weights[j] for (j,lab) in enumerate(labels) if lab == i]
@@ -383,12 +394,13 @@ def cluster_fragments(frags, multiplicity):
         cluster_ix = 0
         for (i,o) in enumerate(out):
             print(i,"Done, ix =",cluster_ix,"to",cluster_ix+max(o)+1)
+            # print(Counter(o))
             frag_global_ixs = [j for (j,lab) in enumerate(labels) if lab == i]
             for (frag_ix,cluster) in enumerate(o):
                 global_ix = frag_global_ixs[frag_ix]
                 cluster_map[global_ix] = cluster+cluster_ix
             cluster_ix += max(o)+1
-    print(Counter(cluster_map))
+    print(Counter(Counter(cluster_map).values()))
     return cluster_map            
 
     # counts = Counter(pc_kmeans.labels_)
@@ -429,7 +441,9 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
     #    multiplicity -= 1
 
     prev_mem = []
-    for iteration in range(20):
+    for iteration in range(100):
+        if iteration == 99:
+            raise "FAILED TO CONVERGE"
         
         if iteration > 0:
             done = True
@@ -522,11 +536,19 @@ def equalize_clusters(frags, membership, centroids, multiplicity=None):
                 if done:
                     break
 
-                if fragsize(j) < multiplicity < fragsize(membership[i]):
+                jsize = fragsize(j)
+                isize = fragsize(membership[i])
+
+                # If i is too big and j is too small, transfer
+                if jsize < multiplicity < isize:
                     #print("Move frag", i, "to cluster", j, "for size")
                     membership[i] = j
                     break
-                if fragsize(membership[i]) <= fragsize(j) < multiplicity:
+                # If i,j both too small, transfer smaller to bigger
+                if isize < jsize < multiplicity:
+                    membership[i] = j
+                    break
+                if jsize < multiplicity-1 and isize == multiplicity:
                     membership[i] = j
                     break
                     
@@ -596,6 +618,33 @@ def main():
     
     print("Initial fragment count:", topology.nfrag())
 
+    #max_d = 0.0
+    #avg_d = 0.0
+    #total_d = 0
+    #ds = []
+    #for frag in topology.fragments:
+    #    atoms = [topology.atoms[at] for at in frag]
+    #    fragment = Fragment(atoms)
+    #    coc = fragment.centre_of_charge()
+    #    for at in atoms:
+    #        if cart(coc,at.coord) > 20.0:
+    #            print(at.coord)
+    #            local_ds = []
+    #            for other in topology.atoms:
+    #                local_ds.append(cart(at.coord, other.coord))
+    #            print(pd.DataFrame(local_ds).describe())
+    #            print(pd.DataFrame(local_ds).quantile(0.05))
+    #            print()
+    #        ds.append(cart(coc,at.coord))
+    #        max_d = max(max_d, cart(coc, at.coord))
+    #        avg_d += cart(coc,at.coord)
+    #        total_d += 1
+    #df = pd.DataFrame(ds)
+    #print(df.describe())
+    #print("max_d =",max_d)
+    #print("avg_d =",avg_d/total_d)
+    #return 0
+
     # Check if input can be paired
     paired_input = check_for_pairs(topology.assemble_fragments())
     if args.pair and not paired_input:
@@ -616,6 +665,25 @@ def main():
     print("Clustering fragments with multiplicity", args.multiplicity)
     topology = form_clustered_topology(topology,args.multiplicity)
     print("Final fragment count:", topology.nfrag())
+
+    max_d = 0.0
+    avg_d = 0.0
+    total_d = 0
+    ds = []
+    for frag in topology.fragments:
+        atoms = [topology.atoms[at] for at in frag]
+        fragment = Fragment(atoms)
+        coc = fragment.centre_of_charge()
+        for at in atoms:
+            d = cart(coc,at.coord)
+            ds.append(cart(coc,at.coord))
+            max_d = max(max_d, cart(coc, at.coord))
+            avg_d += cart(coc,at.coord)
+            total_d += 1
+    df = pd.DataFrame(ds)
+    print(df.describe())
+    print("max_d =",max_d)
+    print("avg_d =",avg_d/total_d)
 
     with open(args.o,'w') as f:
         json.dump(topology.to_json(),f,indent=4)
